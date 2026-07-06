@@ -30,8 +30,8 @@ current_result = {
 
 current_session_id = None
 ws_connection = None
-websocket_task = None
-reconnect_delay = 2.5  # seconds
+reconnect_delay = 2.5          # delay khi reconnect do lỗi
+reconnect_interval = 10.0      # tự động reconnect mỗi 10s
 start_time = time.time()
 
 # Hàm lấy thời gian Việt Nam (UTC+7)
@@ -42,16 +42,13 @@ def get_vietnam_time():
 def parse_token_data(token_text):
     """Parse token data từ file token.txt"""
     try:
-        # Tìm và trích xuất info JSON
         info_match = re.search(r'"info"\x07([^"]+?)"?', token_text)
         if info_match:
             info_str = info_match.group(1)
-            # Làm sạch chuỗi JSON
             info_str = info_str.replace('\x04', '').replace('\x07', '').replace('\x05', '').replace('\x06', '')
             info_data = json.loads(info_str)
             return info_data
         
-        # Nếu không tìm thấy info, tìm trực tiếp JSON
         json_match = re.search(r'\{[^{}]*"ipAddress"[^{}]*\}', token_text)
         if json_match:
             return json.loads(json_match.group())
@@ -66,11 +63,9 @@ def load_token():
     try:
         with open('token.txt', 'r', encoding='utf-8') as f:
             token_data = f.read().strip()
-        
         if not token_data:
             print("[❌] File token.txt trống")
             return None
-        
         parsed_data = parse_token_data(token_data)
         if parsed_data:
             print("[✅] Đã load token từ token.txt")
@@ -78,7 +73,6 @@ def load_token():
         else:
             print("[❌] Không thể parse token từ token.txt")
             return None
-            
     except FileNotFoundError:
         print("[❌] Không tìm thấy file token.txt")
         return None
@@ -95,8 +89,6 @@ if TOKEN_DATA:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Origin": "https://play.sun.pw"
     }
-    
-    # Initial messages
     initial_messages = [
         [
             1,
@@ -152,34 +144,26 @@ else:
     ]
 
 def get_network_info():
-    """Lấy thông tin mạng"""
     try:
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
-        
         try:
             response = requests.get('https://api.ipify.org?format=json', timeout=5)
             public_ip = response.json()['ip']
         except:
             public_ip = None
-            
         return {'localIP': local_ip, 'publicIP': public_ip}
     except Exception as e:
         print(f"Lỗi lấy network info: {e}")
         return {'localIP': '127.0.0.1', 'publicIP': None}
 
 def handle_error(context, error):
-    """Xử lý lỗi"""
     error_msg = f"Lỗi - {context}: {str(error)}"
     print(f"[❌] {error_msg}")
     return error_msg
 
 def get_ws_connect_kwargs():
-    """Trả về kwargs phù hợp với phiên bản websockets đang dùng"""
-    kwargs = {
-        "ping_interval": 15,
-        "ping_timeout": 10,
-    }
+    kwargs = {"ping_interval": 15, "ping_timeout": 10}
     try:
         ws_version = tuple(int(x) for x in websockets.__version__.split('.')[:2])
         if ws_version >= (11, 0):
@@ -187,40 +171,45 @@ def get_ws_connect_kwargs():
         else:
             kwargs["extra_headers"] = WS_HEADERS
     except Exception:
-        # Mặc định dùng additional_headers (phiên bản mới)
         kwargs["additional_headers"] = WS_HEADERS
     return kwargs
 
 async def connect_websocket():
-    """Kết nối WebSocket"""
     global ws_connection, current_session_id, current_result
-    
+
     connect_kwargs = get_ws_connect_kwargs()
-    
+
     while True:
         try:
             print("[🔄] Đang kết nối WebSocket...")
-            
             ws_connection = await websockets.connect(
                 WEBSOCKET_URL,
                 **connect_kwargs
             )
-            
             print("[✅] WebSocket connected to Sun.Win")
-            
+
             # Gửi initial messages
             for i, msg in enumerate(initial_messages):
                 await asyncio.sleep(i * 0.6)
                 await ws_connection.send(json.dumps(msg))
-            
-            # Nhận messages
+
+            # Lưu thời gian bắt đầu kết nối để tự động reconnect sau 10s
+            conn_start = time.time()
+
+            # Vòng lặp nhận tin
             async for message in ws_connection:
+                # Kiểm tra tự động reconnect sau 10s
+                if time.time() - conn_start >= reconnect_interval:
+                    print(f"[⏳] Đã {reconnect_interval}s, tự động reconnect...")
+                    await ws_connection.close()
+                    break   # Thoát khỏi vòng lặp nhận tin, vòng while ngoài sẽ reconnect
+
                 try:
                     data = json.loads(message)
-                    
+
                     if not isinstance(data, list) or len(data) < 2:
                         continue
-                    
+
                     if isinstance(data[1], dict):
                         cmd = data[1].get('cmd')
                         sid = data[1].get('sid')
@@ -228,20 +217,34 @@ async def connect_websocket():
                         d2 = data[1].get('d2')
                         d3 = data[1].get('d3')
                         gBB = data[1].get('gBB')
-                        
+
+                        # Cập nhật phiên mới
                         if cmd == 1008 and sid:
                             current_session_id = sid
-                            print(f"[🎮] Phiên mới: {sid}")
-                        
+                            print(f"[🎮] Phiên mới từ 1008: {sid}")
+
+                        # Xử lý kết quả
                         if cmd == 1003 and gBB:
+                            # Ưu tiên lấy sid trực tiếp từ message 1003
+                            session_id = data[1].get('sid')
+                            if session_id is None:
+                                session_id = current_session_id
+                            else:
+                                # Nếu có sid trong 1003 thì dùng luôn, không cần reset
+                                pass
+
+                            if session_id is None:
+                                print("[⚠️] Không có session_id cho kết quả, bỏ qua")
+                                continue
+
                             if d1 is None or d2 is None or d3 is None:
                                 continue
-                            
+
                             total = d1 + d2 + d3
                             result = "Tài" if total > 10 else "Xỉu"
-                            
+
                             current_result = {
-                                "phien": current_session_id,
+                                "phien": session_id,
                                 "xuc_xac_1": d1,
                                 "xuc_xac_2": d2,
                                 "xuc_xac_3": d3,
@@ -249,16 +252,18 @@ async def connect_websocket():
                                 "ket_qua": result,
                                 "thoi_gian": get_vietnam_time()
                             }
-                            
-                            print(f"[🎲] Phiên {current_result['phien']}: {d1}-{d2}-{d3} = {total} ({result}) - {current_result['thoi_gian']}")
-                            
-                            current_session_id = None
-                            
+
+                            print(f"[🎲] Phiên {session_id}: {d1}-{d2}-{d3} = {total} ({result}) - {current_result['thoi_gian']}")
+
+                            # Reset current_session_id nếu không có sid từ 1003
+                            if data[1].get('sid') is None:
+                                current_session_id = None
+
                 except json.JSONDecodeError as e:
                     handle_error("Parse JSON", e)
                 except Exception as e:
                     handle_error("Xử lý message", e)
-                    
+
         except websockets.exceptions.ConnectionClosed as e:
             handle_error("WebSocket đóng", e)
             await asyncio.sleep(reconnect_delay)
@@ -269,41 +274,34 @@ async def connect_websocket():
 # Flask routes
 @app.route('/api/tx', methods=['GET'])
 def get_tx_result():
-    """Endpoint lấy kết quả tài xỉu mới nhất"""
     return jsonify(current_result)
 
 @app.route('/', methods=['GET'])
 def index():
-    """Trang chủ"""
     return jsonify({
         "name": "Sun.Win Tài Xỉu Data Stream",
         "version": "1.0",
-        "endpoints": {
-            "/api/tx": "Lấy kết quả tài xỉu mới nhất"
-        },
+        "endpoints": {"/api/tx": "Lấy kết quả tài xỉu mới nhất"},
         "thoi_gian": get_vietnam_time(),
         "current_user": TOKEN_DATA.get('username') if TOKEN_DATA else "Unknown"
     })
 
-# Xử lý các route không tồn tại
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint không tồn tại. Chỉ có /api/tx"}), 404
 
 def run_flask():
-    """Chạy Flask server"""
     try:
         app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
     except Exception as e:
         handle_error("Flask server", e)
 
 async def main():
-    """Main function"""
     global start_time
     start_time = time.time()
-    
+
     network_info = get_network_info()
-    
+
     print("\n" + "="*60)
     print("🎲 Sun.Win Tài Xỉu Data Stream")
     print("="*60)
@@ -321,23 +319,20 @@ async def main():
     print("📊 API Endpoint:")
     print(f"   🎯 /api/tx - Lấy kết quả tài xỉu mới nhất")
     print("="*60 + "\n")
-    
-    # Chạy Flask trong thread riêng
+
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    # Kết nối WebSocket
+
     await connect_websocket()
 
 def signal_handler(sig, frame):
-    """Xử lý tín hiệu dừng"""
     print("\n[👋] Đang tắt server...")
     sys.exit(0)
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
