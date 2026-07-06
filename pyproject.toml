@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sunwin-taixiu-stream"
+version = "1.0.0"
+description = "Stream kết quả Tài Xỉu từ Sun.Win qua WebSocket và cung cấp API Flask"
+readme = "README.md"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "Flask==2.3.3",
+    "Flask-CORS==4.0.0",
+    "websockets==10.4",
+    "requests==2.31.0",
+]
+
+# (Tuỳ chọn) Định nghĩa script để chạy ứng dụng nếu bạn có hàm main() đồng bộ
+# [project.scripts]
+# sunwin-tx = "main:main"   # cần chỉnh sửa main.py để export hàm main()
+
+[tool.setuptools]
+py-modules = ["main"]   # vì chỉ có một file main.py
+
+# (Tuỳ chọn) Cấu hình cho các công cụ khác
+[tool.black]   # nếu dùng black để format
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.isort]
+profile = "black"
