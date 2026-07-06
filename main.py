@@ -12,8 +12,6 @@ import re
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from collections import deque
-import math
 
 app = Flask(__name__)
 CORS(app)
@@ -24,6 +22,7 @@ MAX_HISTORY = 100000
 DATA_FILE = 'history.json'
 PREDICTIONS_FILE = 'predictions.json'
 STATS_FILE = 'stats.json'
+HISTORY_API_URL = os.environ.get('HISTORY_API_URL', 'https://apisunwinhistory.onrender.com/api/history')
 
 # ==================== BIẾN TOÀN CỤC ====================
 current_result = {
@@ -36,7 +35,7 @@ current_result = {
     "thoi_gian": ""
 }
 
-history = []  # Lịch sử phiên (mới nhất ở đầu)
+history = []          # Lịch sử phiên (mới nhất ở đầu)
 predictions_log = []  # Lịch sử dự đoán
 current_session_id = None
 ws_connection = None
@@ -81,7 +80,6 @@ def vn_now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def normalize_result(result):
-    """Chuẩn hóa kết quả Tài/Xỉu"""
     if result is None:
         return None
     r = str(result).upper().strip()
@@ -149,7 +147,7 @@ if TOKEN_DATA:
         [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
     ]
 else:
-    print("[❌] Không load được token, dùng token mặc định")
+    print("[❌] Không load được token, dùng token mặc định (có thể không hoạt động)")
     WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0"
     WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
     initial_messages = [
@@ -186,168 +184,92 @@ class TXPredictor:
         self.history = sorted(data, key=lambda x: x.get('phien', 0), reverse=True)
 
     def get_results(self):
-        """Lấy chuỗi kết quả Tài/Xỉu"""
         return [normalize_result(s.get('ket_qua', '')) for s in self.history if s.get('ket_qua')]
 
     def get_points(self):
-        """Lấy điểm số"""
         return [s.get('tong', 0) for s in self.history if s.get('tong') is not None]
 
     def detect_pattern(self, results):
-        """Phát hiện các pattern"""
         if len(results) < 2:
             return None
 
-        # 1. Đu Bệt (bệt dài)
+        # 1. Đu Bệt
         length = 1
         for i in range(1, len(results)):
             if results[i] == results[0]:
                 length += 1
             else:
                 break
-        if length >= 3 and length <= 5:
-            return {
-                "prediction": results[0],
-                "confidence": 72 + length * 2,
-                "pattern": "Đu Bệt",
-                "reason": f"Bệt {length} phiên"
-            }
+        if 3 <= length <= 5:
+            return {"prediction": results[0], "confidence": 72 + length * 2, "pattern": "Đu Bệt", "reason": f"Bệt {length} phiên"}
         if length >= 6:
-            return {
-                "prediction": "Xỉu" if results[0] == "Tài" else "Tài",
-                "confidence": 80,
-                "pattern": "Bẻ Bệt Rồng",
-                "reason": f"Bệt dài {length} -> bẻ"
-            }
+            return {"prediction": "Xỉu" if results[0] == "Tài" else "Tài", "confidence": 80, "pattern": "Bẻ Bệt Rồng", "reason": f"Bệt dài {length} -> bẻ"}
 
-        # 2. Cầu Nối 1-1
-        if len(results) >= 5:
-            is_alternating = all(results[i] != results[i+1] for i in range(4))
-            if is_alternating:
-                return {
-                    "prediction": "Xỉu" if results[0] == "Tài" else "Tài",
-                    "confidence": 82,
-                    "pattern": "Cầu Nối 1-1",
-                    "reason": "Nhịp 1-1 ổn định"
-                }
+        # 2. Cầu nối 1-1
+        if len(results) >= 5 and all(results[i] != results[i+1] for i in range(4)):
+            return {"prediction": "Xỉu" if results[0] == "Tài" else "Tài", "confidence": 82, "pattern": "Cầu Nối 1-1", "reason": "Nhịp 1-1 ổn định"}
 
-        # 3. Cầu 2-2 và 3-3
-        if len(results) >= 4:
-            if results[0] == results[1] and results[2] == results[3] and results[0] != results[2]:
-                return {
-                    "prediction": results[2],
-                    "confidence": 78,
-                    "pattern": "Cầu 2-2",
-                    "reason": "AABB -> B"
-                }
-        if len(results) >= 6:
-            if (results[0] == results[1] == results[2] and 
-                results[3] == results[4] == results[5] and 
-                results[0] != results[3]):
-                return {
-                    "prediction": results[3],
-                    "confidence": 80,
-                    "pattern": "Cầu 3-3",
-                    "reason": "AAABBB -> B"
-                }
+        # 3. Cầu 2-2, 3-3
+        if len(results) >= 4 and results[0] == results[1] and results[2] == results[3] and results[0] != results[2]:
+            return {"prediction": results[2], "confidence": 78, "pattern": "Cầu 2-2", "reason": "AABB -> B"}
+        if len(results) >= 6 and results[0] == results[1] == results[2] and results[3] == results[4] == results[5] and results[0] != results[3]:
+            return {"prediction": results[3], "confidence": 80, "pattern": "Cầu 3-3", "reason": "AAABBB -> B"}
 
         # 4. Gãy cầu
         if len(results) >= 5:
             if results[0] == results[1] == results[2] and results[2] != results[3] and results[3] == results[4]:
-                return {
-                    "prediction": results[3],
-                    "confidence": 74,
-                    "pattern": "Gãy 3-2",
-                    "reason": "AAABB -> B"
-                }
+                return {"prediction": results[3], "confidence": 74, "pattern": "Gãy 3-2", "reason": "AAABB -> B"}
             if results[0] == results[1] and results[1] != results[2] and results[2] == results[3] == results[4]:
-                return {
-                    "prediction": results[2],
-                    "confidence": 74,
-                    "pattern": "Gãy 2-3",
-                    "reason": "AABBB -> B"
-                }
+                return {"prediction": results[2], "confidence": 74, "pattern": "Gãy 2-3", "reason": "AABBB -> B"}
 
         # 5. Mẫu lặp
         if len(results) >= 6:
-            for pattern_len in [2, 3, 4]:
-                pattern = results[:pattern_len]
-                for i in range(pattern_len, len(results) - pattern_len):
-                    if results[i:i+pattern_len] == pattern:
-                        return {
-                            "prediction": results[i-1],
-                            "confidence": 88,
-                            "pattern": "Mẫu Lặp",
-                            "reason": f"Mẫu {pattern}"
-                        }
+            for plen in [2, 3, 4]:
+                pattern = results[:plen]
+                for i in range(plen, len(results) - plen):
+                    if results[i:i+plen] == pattern:
+                        return {"prediction": results[i-1], "confidence": 88, "pattern": "Mẫu Lặp", "reason": f"Mẫu {pattern}"}
 
-        # 6. Phân tích điểm (vị)
+        # 6. Phân tích điểm
         points = self.get_points()
         if len(points) >= 5:
             last = points[0]
             avg = sum(points[:5]) / 5
-
             if last >= 15:
                 return {"prediction": "Xỉu", "confidence": 75, "pattern": "Vị cực đại", "reason": f"Điểm {last} -> Xỉu"}
             if last <= 5:
                 return {"prediction": "Tài", "confidence": 75, "pattern": "Vị cực tiểu", "reason": f"Điểm {last} -> Tài"}
-            if avg > 12 and last > points[1] if len(points) > 1 else False:
+            if avg > 12 and len(points) > 1 and last > points[1]:
                 return {"prediction": "Xỉu", "confidence": 68, "pattern": "Vị bão hòa", "reason": "Đà tăng chạm ngưỡng"}
-            if avg < 9 and last < points[1] if len(points) > 1 else False:
+            if avg < 9 and len(points) > 1 and last < points[1]:
                 return {"prediction": "Tài", "confidence": 68, "pattern": "Vị cạn kiệt", "reason": "Đà giảm chạm đáy"}
 
-        # 7. Theo (mặc định)
+        # 7. Theo
         if results:
-            return {
-                "prediction": results[0],
-                "confidence": 55,
-                "pattern": "Theo",
-                "reason": "Bám phiên cuối"
-            }
-
+            return {"prediction": results[0], "confidence": 55, "pattern": "Theo", "reason": "Bám phiên cuối"}
         return None
 
     def apply_reversal(self, result):
-        """Áp dụng đảo chiều nếu sai liên tiếp"""
         if not result:
             return result
         if self.error_streak >= 2 and self.last_prediction:
-            return {
-                **result,
-                "prediction": "Xỉu" if result["prediction"] == "Tài" else "Tài",
-                "confidence": min(88, result["confidence"] + 10),
-                "reason": f"🔄 Đảo: {result['reason']}"
-            }
+            return {**result, "prediction": "Xỉu" if result["prediction"] == "Tài" else "Tài", "confidence": min(88, result["confidence"] + 10), "reason": f"🔄 Đảo: {result['reason']}"}
         return result
 
     def predict(self, data):
-        """Đưa ra dự đoán"""
         self.load_history(data)
         results = self.get_results()
         if len(results) < 5:
-            return {
-                "prediction": "Tài",
-                "confidence": 50,
-                "pattern": "Chưa đủ dữ liệu",
-                "reason": "Cần ít nhất 5 phiên"
-            }
-
+            return {"prediction": "Tài", "confidence": 50, "pattern": "Chưa đủ dữ liệu", "reason": "Cần ít nhất 5 phiên"}
         result = self.detect_pattern(results)
         if result:
             result = self.apply_reversal(result)
             self.last_prediction = result["prediction"]
             self.last_pattern = result["pattern"]
             return result
-
-        return {
-            "prediction": results[0] if results else "Tài",
-            "confidence": 50,
-            "pattern": "Theo",
-            "reason": "Mặc định"
-        }
+        return {"prediction": results[0] if results else "Tài", "confidence": 50, "pattern": "Theo", "reason": "Mặc định"}
 
     def update_result(self, actual):
-        """Cập nhật kết quả thực tế"""
         if self.last_prediction:
             if self.last_prediction == normalize_result(actual):
                 self.error_streak = 0
@@ -358,7 +280,6 @@ predictor = TXPredictor()
 
 # ==================== LƯU TRỮ DỮ LIỆU ====================
 def save_history():
-    """Lưu lịch sử vào file JSON"""
     try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump({
@@ -371,7 +292,6 @@ def save_history():
         print(f"[❌] Lỗi lưu history: {e}")
 
 def load_history_file():
-    """Tải lịch sử từ file JSON"""
     global history
     try:
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -387,7 +307,6 @@ def load_history_file():
         return False
 
 def save_predictions():
-    """Lưu lịch sử dự đoán"""
     try:
         with open(PREDICTIONS_FILE, 'w', encoding='utf-8') as f:
             json.dump(predictions_log[-5000:], f, ensure_ascii=False, indent=2)
@@ -395,18 +314,13 @@ def save_predictions():
         print(f"[❌] Lỗi lưu predictions: {e}")
 
 def save_stats():
-    """Lưu thống kê"""
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({
-                "stats": stats,
-                "detailed_stats": detailed_stats
-            }, f, ensure_ascii=False, indent=2)
+            json.dump({"stats": stats, "detailed_stats": detailed_stats}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[❌] Lỗi lưu stats: {e}")
 
 def load_stats():
-    """Tải thống kê"""
     global stats, detailed_stats
     try:
         with open(STATS_FILE, 'r', encoding='utf-8') as f:
@@ -422,60 +336,62 @@ def load_stats():
         print(f"[❌] Lỗi tải stats: {e}")
         return False
 
+def fetch_initial_history_from_api():
+    """Lấy lịch sử từ API bên ngoài nếu chưa có dữ liệu"""
+    global history
+    if len(history) > 0:
+        return
+    try:
+        print(f"[📡] Đang lấy lịch sử từ {HISTORY_API_URL}...")
+        response = requests.get(HISTORY_API_URL, params={"limit": 1000}, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data and "data" in data:
+                history = data["data"]
+                history.sort(key=lambda x: x.get('phien', 0), reverse=True)
+                print(f"[✅] Đã tải {len(history)} phiên từ API")
+                save_history()
+                return True
+        print(f"[⚠️] Không lấy được lịch sử từ API, status: {response.status_code}")
+    except Exception as e:
+        print(f"[❌] Lỗi fetch initial history: {e}")
+    return False
+
 # ==================== XỬ LÝ PHIÊN MỚI ====================
 def process_new_session(session):
-    """Xử lý phiên mới từ WebSocket"""
     global history, current_result, stats, detailed_stats, current_session_id
 
     if not session or not session.get('phien'):
         return
 
     phien = session.get('phien')
-    
     # Kiểm tra trùng lặp
     if any(s.get('phien') == phien for s in history[:10]):
         return
 
-    # Thêm vào lịch sử (mới nhất ở đầu)
     history.insert(0, session)
-    
-    # Giới hạn số lượng
     if len(history) > MAX_HISTORY:
         history = history[:MAX_HISTORY]
 
-    # Cập nhật current_result
     current_result = session.copy()
-
-    # Cập nhật predictor
     predictor.load_history(history)
-
-    # Kiểm tra kết quả dự đoán cho phiên này
     check_prediction_result(session)
 
-    # Lưu dữ liệu (mỗi 10 phiên)
     if len(history) % 10 == 0:
         save_history()
         save_stats()
 
-    print(f"📥 Phiên {phien}: {session.get('xuc_xac_1')}-{session.get('xuc_xac_2')}-{session.get('xuc_xac_3')} "
-          f"= {session.get('tong')} ({session.get('ket_qua')}) - {session.get('thoi_gian')}")
-
-    # Reset session_id sau khi xử lý
-    current_session_id = None
+    print(f"📥 Phiên {phien}: {session.get('xuc_xac_1')}-{session.get('xuc_xac_2')}-{session.get('xuc_xac_3')} = {session.get('tong')} ({session.get('ket_qua')}) - {session.get('thoi_gian')}")
 
 # ==================== DỰ ĐOÁN ====================
 def predict_next():
-    """Dự đoán phiên tiếp theo"""
     if len(history) < 10:
         return None
-
     result = predictor.predict(history)
     if not result:
         return None
-
     latest_phien = history[0].get('phien', 0)
     predicted_phien = latest_phien + 1
-
     prediction = {
         "phien_hien_tai": latest_phien,
         "phien_du_doan": predicted_phien,
@@ -487,32 +403,22 @@ def predict_next():
         "ket_qua": None,
         "ket_qua_dung_sai": None
     }
-
-    # Kiểm tra trùng lặp
     if not any(p.get('phien_du_doan') == predicted_phien for p in predictions_log[-100:]):
         predictions_log.append(prediction)
         save_predictions()
-
     return prediction
 
 def check_prediction_result(session):
-    """Kiểm tra kết quả dự đoán cho phiên vừa ra"""
     global stats, detailed_stats
-
     phien = session.get('phien')
     actual = normalize_result(session.get('ket_qua'))
-    
     if not phien or not actual:
         return
-
-    # Tìm dự đoán chưa có kết quả
     for pred in predictions_log:
         if pred.get('phien_du_doan') == phien and pred.get('ket_qua') is None:
             pred['ket_qua'] = actual
             correct = pred['du_doan'] == actual
             pred['ket_qua_dung_sai'] = '✅ Đúng' if correct else '❌ Sai'
-            
-            # Cập nhật thống kê
             stats['total_predictions'] += 1
             if correct:
                 stats['correct'] += 1
@@ -524,11 +430,9 @@ def check_prediction_result(session):
                 if stats['current_streak'] > stats['worst_streak']:
                     stats['worst_streak'] = stats['current_streak']
                 stats['current_streak'] = 0
-
             stats['accuracy'] = (stats['correct'] / stats['total_predictions'] * 100) if stats['total_predictions'] > 0 else 0
             stats['last_updated'] = get_vietnam_time()
 
-            # Cập nhật thống kê chi tiết
             pattern = pred.get('pattern', 'Theo')
             if pattern not in detailed_stats['by_pattern']:
                 detailed_stats['by_pattern'][pattern] = {"total": 0, "correct": 0, "wrong": 0}
@@ -538,14 +442,13 @@ def check_prediction_result(session):
             else:
                 detailed_stats['by_pattern'][pattern]['wrong'] += 1
 
-            confidence = pred.get('do_tin_cay', 50)
+            conf = pred.get('do_tin_cay', 50)
             conf_range = '0-50'
-            if 51 <= confidence <= 60: conf_range = '51-60'
-            elif 61 <= confidence <= 70: conf_range = '61-70'
-            elif 71 <= confidence <= 80: conf_range = '71-80'
-            elif 81 <= confidence <= 90: conf_range = '81-90'
-            elif confidence >= 91: conf_range = '91-100'
-            
+            if 51 <= conf <= 60: conf_range = '51-60'
+            elif 61 <= conf <= 70: conf_range = '61-70'
+            elif 71 <= conf <= 80: conf_range = '71-80'
+            elif 81 <= conf <= 90: conf_range = '81-90'
+            elif conf >= 91: conf_range = '91-100'
             if conf_range in detailed_stats['by_confidence']:
                 detailed_stats['by_confidence'][conf_range]['total'] += 1
                 if correct:
@@ -560,9 +463,7 @@ def check_prediction_result(session):
                 else:
                     detailed_stats['by_prediction'][pred['du_doan']]['wrong'] += 1
 
-            # Cập nhật predictor
             predictor.update_result(actual)
-
             print(f"🎯 Dự đoán phiên {phien}: {pred['du_doan']} → {actual} → {pred['ket_qua_dung_sai']}")
             save_predictions()
             save_stats()
@@ -605,7 +506,6 @@ async def connect_websocket():
             ws_connection = await websockets.connect(WEBSOCKET_URL, **connect_kwargs)
             print("[✅] WebSocket connected to Sun.Win")
 
-            # Gửi initial messages
             for i, msg in enumerate(initial_messages):
                 await asyncio.sleep(i * 0.6)
                 await ws_connection.send(json.dumps(msg))
@@ -613,7 +513,6 @@ async def connect_websocket():
             conn_start = time.time()
 
             async for message in ws_connection:
-                # Tự động reconnect sau 10s
                 if time.time() - conn_start >= reconnect_interval:
                     print(f"[⏳] Đã {reconnect_interval}s, tự động reconnect...")
                     await ws_connection.close()
@@ -632,22 +531,27 @@ async def connect_websocket():
                         d3 = data[1].get('d3')
                         gBB = data[1].get('gBB')
 
-                        # Lưu session ID
+                        # Cập nhật phiên mới khi nhận 1008 (giữ nguyên cho đến khi có 1008 mới)
                         if cmd == 1008 and sid:
                             current_session_id = sid
-                            print(f"[🎮] Phiên mới từ 1008: {sid}")
+                            print(f"[🎮] Cập nhật phiên mới: {sid}")
 
-                        # Nhận kết quả
+                        # Xử lý kết quả
                         if cmd == 1003 and gBB:
-                            # Lấy sid từ message 1003, nếu không có thì dùng current_session_id
-                            session_id = data[1].get('sid') or current_session_id
+                            # Lấy sid từ message, nếu không có thì dùng current_session_id
+                            sid_from_msg = data[1].get('sid')
+                            session_id = sid_from_msg if sid_from_msg is not None else current_session_id
                             
+                            if session_id is None:
+                                # Thử lấy từ dữ liệu khác? Nếu không có thì bỏ qua
+                                print("[⚠️] Không có session_id cho kết quả, bỏ qua")
+                                continue
+
                             if d1 is None or d2 is None or d3 is None:
                                 continue
 
                             total = d1 + d2 + d3
                             result = "Tài" if total > 10 else "Xỉu"
-
                             session_data = {
                                 "phien": session_id,
                                 "xuc_xac_1": d1,
@@ -657,13 +561,8 @@ async def connect_websocket():
                                 "ket_qua": result,
                                 "thoi_gian": get_vietnam_time()
                             }
-
-                            # Xử lý phiên mới
                             process_new_session(session_data)
-                            
-                            # Reset session_id nếu không có sid trong message
-                            if not data[1].get('sid'):
-                                current_session_id = None
+                            # KHÔNG reset current_session_id ở đây
 
                 except json.JSONDecodeError as e:
                     print(f"[❌] JSON Parse error: {e}")
@@ -684,12 +583,13 @@ def index():
         "name": "Sun.Win Tài Xỉu VIP",
         "version": "2.0",
         "endpoints": {
-            "/api/tx": "Lấy kết quả mới nhất",
-            "/api/history": "Lấy lịch sử (limit=100)",
-            "/api/predict": "Dự đoán phiên tiếp theo",
+            "/api/tx": "Kết quả mới nhất",
+            "/api/history": "Lịch sử (limit=100)",
+            "/api/predict": "Dự đoán tiếp theo",
             "/api/stats": "Thống kê tổng quan",
             "/api/detailed_stats": "Thống kê chi tiết",
-            "/api/predictions": "Lịch sử dự đoán"
+            "/api/predictions": "Lịch sử dự đoán",
+            "/api/summary": "Tóm tắt"
         },
         "total_sessions": len(history),
         "current_user": TOKEN_DATA.get('username') if TOKEN_DATA else "Unknown",
@@ -714,12 +614,9 @@ def get_history():
 def get_prediction():
     if len(history) < 10:
         return jsonify({"error": "Cần ít nhất 10 phiên để dự đoán"}), 400
-    
     pred = predict_next()
     if not pred:
         return jsonify({"error": "Không thể đưa ra dự đoán"}), 400
-    
-    # Thêm thông tin phiên hiện tại
     latest = history[0] if history else {}
     return jsonify({
         "phien_hien_tai": latest.get('phien'),
@@ -751,7 +648,6 @@ def get_detailed_stats():
 
 @app.route('/api/summary', methods=['GET'])
 def get_summary():
-    """Tóm tắt tổng quan"""
     return jsonify({
         "total_sessions": len(history),
         "total_predictions": stats['total_predictions'],
@@ -765,7 +661,6 @@ def get_summary():
 
 @app.route('/api/force_save', methods=['POST'])
 def force_save():
-    """Buộc lưu dữ liệu"""
     save_history()
     save_predictions()
     save_stats()
@@ -786,11 +681,10 @@ def run_flask():
 async def main():
     global start_time
 
-    # Tải dữ liệu
     load_history_file()
+    if not history:
+        fetch_initial_history_from_api()
     load_stats()
-    
-    # Cập nhật predictor
     if history:
         predictor.load_history(history)
 
@@ -814,11 +708,9 @@ async def main():
     print("   📈 /api/detailed_stats - Thống kê chi tiết")
     print("="*60 + "\n")
 
-    # Chạy Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Kết nối WebSocket
     await connect_websocket()
 
 def signal_handler(sig, frame):
